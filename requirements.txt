@@ -1,0 +1,10 @@
+# Use Python 3.12 (verified). Python 3.14 has incompatible NumPy constraints
+# between LeRobot 0.6.1 and dm-tree 0.1.10.
+lerobot[core_scripts,training,feetech]==0.6.1
+opencv-python
+numpy>=2.0,<2.3
+pyobjc-framework-AVFoundation; sys_platform == "darwin"
+dm-env==1.6
+dm-tree==0.1.10
+matplotlib
+IPython

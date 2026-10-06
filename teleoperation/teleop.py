@@ -1,0 +1,123 @@
+import time 
+
+from lerobot.teleoperators.so_leader import (
+    SO101Leader,
+    SO101LeaderConfig
+)
+
+from lerobot.robots.so_follower import (
+    SO101Follower,
+    SO101FollowerConfig
+)
+
+# Configurations
+
+LEADER_PORT = "/dev/tty.usbmodem5B8E1128291"
+FOLLOWER_PORT = "/dev/tty.usbmodem5B8E1131141"
+
+LEADER_ID = "so101_leader"
+FOLLOWER_ID = "so101_follower"
+
+CONTROL_HZ = 30.0
+CONTROL_DT = 1.0 / CONTROL_HZ
+
+
+def main():
+
+    print("=========================================")
+    print("         SO-ARM101 TELEOPERATION         ")
+    print("=========================================\n")
+
+    #Config the arm
+
+    leader_config = SO101LeaderConfig(
+        port = LEADER_PORT,
+        id = LEADER_ID,
+    )
+
+    follower_config = SO101FollowerConfig(
+        port = FOLLOWER_PORT,
+        id = FOLLOWER_ID,
+        disable_torque_on_disconnect=True,
+    )
+
+    leader = SO101Leader(leader_config)
+    follower = SO101Follower(follower_config)
+
+    exit_reason = "user"
+
+    # Teleoperate
+    try: 
+        print("Connecting follower....")
+        follower.connect()
+
+        print("Connecting leader...")
+        leader.connect()
+
+        print("Teleoperation started. Press Ctrl+C to stop")
+
+        while True:
+            start_time = time.perf_counter()
+
+            # Read the target position from leader 
+            try:
+                leader_state = leader.get_action()
+            except Exception as e:
+                print(f"\n[ERROR] Leader arm was disconnected: {e}")
+                exit_reason = "LEADER DISCONNECTED"
+                break
+ 
+            # Send target
+            try:
+                follower.send_action(leader_state)
+
+            except Exception as e:
+                print(f"\n[ERROR] Failed to command follower: {e}")
+                exit_reason = "FOLLOWER WRITE ERROR"
+                break
+
+
+            # Control loop in CONTROL_HZ
+            cur_time = time.perf_counter() - start_time
+
+            remaining_time = CONTROL_DT - cur_time
+
+            if remaining_time > 0:
+                time.sleep(remaining_time)
+
+            else:
+                print(
+                    f"Warning slow loop "
+                    f"{cur_time * 1000:.1f} ms"
+                )
+        
+    except KeyboardInterrupt:
+        exit_reason = "KEYBOARD INTERRUPT"
+        print("\nUser Stop Teleoperation...")
+
+    except Exception as e:
+        exit_reason = "UNEXPECTED ERROR"
+        print(f"\n[UNEXPECTED ERROR] {type(e).__name__}: {e}")
+
+    finally:
+
+        print(f"\nExit reason: {exit_reason}")
+
+        leader.disconnect()
+        follower.disconnect()
+
+        print("Disconnected")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+
+
