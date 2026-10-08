@@ -22,12 +22,6 @@ LeRobot provides the motor and camera drivers. This repository provides its own 
 - Two cameras accessible through OpenCV, mounted consistently at the wrist and in front of the workspace.
 - Camera permission for the terminal or application running Python, under **System Settings → Privacy & Security → Camera**.
 
-Software verification on **8 October 2026** used LeRobot 0.6.1, PyTorch 2.11.0, torchvision 0.26.0, NumPy 2.2.6, and OpenCV 5.0.0.93. `pip check` passed and MPS was available. During the review, 18 checks passed, covering recording/loading, padding, joint ordering, normalization, cleanup, and ACT training/checkpoint/inference using synthetic data and mocked hardware. The temporary test suite is not included in this repository.
-
-A full synthetic smoke run also passed on MPS with two 640×480 cameras, chunk size 20, hidden dimension 128, four encoder layers and seven decoder layers. It recorded/loaded two separate episodes, trained for one epoch, saved and reloaded the best checkpoint, and produced finite `(1, 20, 6)` inference output.
-
-**Datasets, trained checkpoints, and calibration files are not included.** Calibration, physical teleoperation, camera placement, and autonomous task success must be checked on your own hardware. Software smoke tests do not measure manipulation performance.
-
 ## 1. Install the environment
 
 Install Conda or Miniforge first, then run:
@@ -36,8 +30,8 @@ Install Conda or Miniforge first, then run:
 git clone https://github.com/dthiendinh/Building-ACT-for-SO-ARM101-in-MacOS.git
 cd Building-ACT-for-SO-ARM101-in-MacOS
 
-conda create -n so_arm101_py312 python=3.12 -y
-conda activate so_arm101_py312
+conda create -n virtual_environment python=3.12 -y
+conda activate virtual_environment
 python -m pip install -r requirements.txt
 python -m pip check
 ```
@@ -148,7 +142,7 @@ A custom Hugging Face/LeRobot cache location can change that base path. Keep the
 ## 4. Check teleoperation
 
 ```bash
-python -m teleoperation.teleop
+python -B -m teleoperation.teleop
 ```
 
 The follower starts tracking the leader after connection. Move the leader slowly and verify that corresponding joints and the gripper track correctly. Stop with `Ctrl+C`. Close this process before starting recording or evaluation: one process should own the follower port at a time.
@@ -169,7 +163,7 @@ Keep this order consistent between recording, training, reset poses, and inferen
 ## 5. Record demonstrations
 
 ```bash
-python -m teleoperation.record_teleop_data --data-dir pick_place_act_v1
+python -B -m teleoperation.record_teleop_data --data-dir pick_place_act_v1
 ```
 
 `--data-dir` names the dataset folder under `teleoperation/data/`. The recorder connects both arms and both cameras, opens a dashboard, and starts teleoperation immediately, including when no episode is being recorded.
@@ -299,7 +293,7 @@ Older recordings without `joint_names` are assumed to use this project's legacy 
 First run one epoch to check the complete training path:
 
 ```bash
-MPLBACKEND=Agg python -m act.imitate_episodes \
+MPLBACKEND=Agg python -B -m act.imitate_episodes \
   --task_name so101_pick_place \
   --ckpt_dir outputs/act_pick_place_smoke \
   --policy_class ACT \
@@ -316,7 +310,7 @@ MPLBACKEND=Agg python -m act.imitate_episodes \
 This command requires the dataset and task configuration from steps 6–7. Then train into a **new output directory**, for example:
 
 ```bash
-MPLBACKEND=Agg python -m act.imitate_episodes \
+MPLBACKEND=Agg python -B -m act.imitate_episodes \
   --task_name so101_pick_place \
   --ckpt_dir outputs/act_pick_place_v1 \
   --policy_class ACT \

@@ -11,11 +11,12 @@ RESET_POSE = None
 DT = CONTROL_DT
 MAX_RELATIVE_TARGET = 5.0  # degrees per command; clipped again by LeRobot
 CAMERAS = CAMERA_CONFIGS
+#TODO:
 TASK_CONFIGS = {
     "so101_pick_place": {
-        "dataset_dir": "teleoperation/data/pick_place_act_v1_train",
+        "dataset_dir": "teleoperation/data/pick_candies",
         "num_episodes": 50,  # Set to your approved, consecutively numbered count.
-        "episode_len": 300,  # Evaluation steps; does not truncate training data.
+        "episode_len": 1500,  # Evaluation steps; does not truncate training data.
         "camera_names": ["wrist", "front"],
         "state_dim": 6,
     },
@@ -110,10 +111,10 @@ class RealEnv:
         return robot_action
 
     # Reset
-    def _move_to_pose(self, target_pos, move_time=1.5):
+    def _move_to_pose(self, target_pose, move_time=1.5):
         "Smoothly interpolate from current position to target position."
 
-        target_pose = np.asarray(target_pos,dtype=np.float32)
+        target_pose = np.asarray(target_pose,dtype=np.float32)
         if target_pose.shape != (6,) or not np.all(np.isfinite(target_pose)):
             raise ValueError(
                 "reset pose must contain six finite values"
