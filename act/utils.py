@@ -7,15 +7,8 @@ from torch.utils.data import DataLoader
 import IPython
 e = IPython.embed
 
-MOTOR_NAMES = [
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-]
-CANONICAL_JOINT_NAMES = [f"{name}.pos" for name in MOTOR_NAMES]
+from hardware_constant import JOINT_KEYS
+CANONICAL_JOINT_NAMES = JOINT_KEYS
 LEGACY_ALPHABETICAL_JOINT_NAMES = sorted(CANONICAL_JOINT_NAMES)
 
 
@@ -32,6 +25,8 @@ def canonicalize_joint_columns(data):
         raise ValueError(f"Expected states with shape (T, 6), got {states.shape}")
     if actions.shape != states.shape:
         raise ValueError(f"Action/state shape mismatch: {actions.shape} vs {states.shape}")
+    if not np.isfinite(states).all() or not np.isfinite(actions).all():
+        raise ValueError("Dataset states/actions contain NaN or infinity")
     source_names = (
         [str(name) for name in data["joint_names"].tolist()]
         if "joint_names" in data.files
@@ -182,10 +177,45 @@ def get_norm_stats(dataset_dir, num_episodes, episode_ids=None):
     return stats
 
 
+def validate_dataset(dataset_dir, num_episodes, camera_names):
+    """Fail before training if an episode, joint schema or camera stream is incomplete."""
+    if num_episodes < 2:
+        raise ValueError("At least two episodes are required for separate train/validation splits")
+    if not camera_names:
+        raise ValueError("At least one camera is required")
+    image_sizes = set()
+    for episode_id in range(num_episodes):
+        episode_dir = os.path.join(dataset_dir, f"episode_{episode_id:04d}")
+        data_path = os.path.join(episode_dir, "data.npz")
+        with np.load(data_path) as data:
+            states, _ = canonicalize_joint_columns(data)
+            timestamps = data["timestamps"]
+        if len(states) == 0 or timestamps.shape != (len(states),):
+            raise ValueError(f"Empty episode or timestamp/sample mismatch: {data_path}")
+        if not np.isfinite(timestamps).all() or np.any(np.diff(timestamps) <= 0):
+            raise ValueError(f"Timestamps must be finite and strictly increasing: {data_path}")
+        for name in camera_names:
+            video_path = os.path.join(episode_dir, f"{name}.mp4")
+            cap = cv2.VideoCapture(video_path)
+            try:
+                if not cap.isOpened():
+                    raise ValueError(f"Missing or unreadable camera video: {video_path}")
+                count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                if count != len(states):
+                    raise ValueError(f"Video/sample count mismatch: {video_path} ({count} vs {len(states)})")
+                image_sizes.add((int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                                 int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))))
+            finally:
+                cap.release()
+    if len(image_sizes) != 1:
+        raise ValueError(f"All cameras/episodes must use the same image dimensions: {image_sizes}")
+
+
 def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, chunk_size):
     print(f'\nData from: {dataset_dir}\n')
     if num_episodes < 2:
         raise ValueError("At least two episodes are required for separate train/validation splits")
+    validate_dataset(dataset_dir, num_episodes, camera_names)
     # obtain train test split
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
@@ -198,8 +228,8 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     # construct dataset and dataloader 
     train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, chunk_size)
     val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, chunk_size)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers = 1, prefetch_factor=1)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers = 1, prefetch_factor=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=torch.cuda.is_available(), num_workers = 1, prefetch_factor=1)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=torch.cuda.is_available(), num_workers = 1, prefetch_factor=1)
 
     return train_dataloader, val_dataloader, norm_stats
 

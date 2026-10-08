@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np 
 import torch
-from.model import build_ACT_model, build_CNNMLP_model
+from .models import build_ACT_model, build_CNNMLP_model
 
 import IPython
 e = IPython.embed
@@ -53,28 +53,12 @@ def get_args_parser():
     parser.add_argument('--masks', action= 'store_true',
                         help="Train segmentation head if the flag is provided")
 
-    # repeat args in imitate_episodes just to avoid error. Will not be used 
-    parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--onscreen_render', action='store_true')
-    parser.add_argument('--ckpt_dir', action='store', type=str, help='ckpt_dir', required=True)
-    parser.add_argument('--policy_class', action='store', type=str, help='policy_cass, capitalize', required=True)
-    parser.add_argument('--task_name', action='store', type=str, help='task name', required=True)
-    parser.add_argument('--seed', action='store', type=int, help='seed', required=True)
-    parser.add_argument('--num_epochs', action='store', type=int, help='num_epochs', required=True)
-    parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
-    parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size', required=False)
-    parser.add_argument('--temporal_agg', action='store_true')
-    parser.add_argument('--num_rollouts', type=int, default=1)
-    parser.add_argument('--reset_pose', type=float, nargs=6)
-    parser.add_argument('--max_relative_target', type=float, default=5.0)
-
-
     return parser
 
 
 def build_ACT_model_and_optimizer(args_override):
     parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
+    args = parser.parse_args([])
 
     for k, v in args_override.items():
         setattr(args, k, v)
@@ -99,7 +83,7 @@ def build_ACT_model_and_optimizer(args_override):
 
 def build_CNNMLP_model_and_optimizer(args_override):
     parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
+    args = parser.parse_args([])
 
     for k, v in args_override.items():
         setattr(args, k, v)

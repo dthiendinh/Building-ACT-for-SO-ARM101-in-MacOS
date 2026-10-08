@@ -1,23 +1,30 @@
+# Allow direct execution from the repository as well as python -m.
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import torch
 import numpy as np 
 import os
 import pickle
+import json
 import argparse
 import matplotlib.pyplot as plt
 from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
 
-from utils import load_data  # data functions
-from utils import sample_box_pose, sample_insertion_pose   # robot functions
-from utils import compute_dict_mean, set_seed, detach_dict, aggregate_temporal_actions  # helper functions
-from policy import ACTPolicy, CNNMLPPolicy
+from act.utils import load_data  # data functions
+from act.utils import compute_dict_mean, set_seed, detach_dict, aggregate_temporal_actions  # helper functions
+from act.policy import ACTPolicy, CNNMLPPolicy
 
 import IPython
 e = IPython.embed
 
 # Constant
-DT = 1/30
+from hardware_constant import CONTROL_DT, CAMERA_CONFIGS
+DT = CONTROL_DT
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 
 def make_policy(policy_class, policy_config):
@@ -63,7 +70,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
     # load trained policy 
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
     policy = make_policy(policy_class, policy_config)
-    loading_status = policy.load_state_dict(torch.load(ckpt_path))
+    loading_status = policy.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
     print(loading_status)
     policy.to(device)
     policy.eval()
@@ -74,7 +81,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
     with open(stats_path, 'rb') as f:
         stats = pickle.load(f)
 
-    from utils import CANONICAL_JOINT_NAMES
+    from act.utils import CANONICAL_JOINT_NAMES
     if stats.get('joint_names') != CANONICAL_JOINT_NAMES:
         raise ValueError(
             "dataset_stats.pkl has no verified canonical SO-ARM101 joint schema. "
@@ -88,9 +95,8 @@ def eval_bc(config, ckpt_name, save_episode=True):
     post_process = lambda a: a * stats['action_std'] + stats['action_mean']
 
     # load environment
-    # TODO thay phần này thành của SO_ARM
-    from low_level_control import make_real_env
-    from low_level_control import (
+    from act.low_level_control import make_real_env
+    from act.low_level_control import (
         ROBOT_PORT,
         ROBOT_ID,
         CAMERAS,
@@ -106,6 +112,13 @@ def eval_bc(config, ckpt_name, save_episode=True):
             "Evaluation on the real robot requires --reset_pose with six values."
         )
     max_relative_target = config.get('max_relative_target', MAX_RELATIVE_TARGET)
+    num_rollouts = config.get('num_rollouts', 1)
+    if num_rollouts < 1:
+        raise ValueError("num_rollouts must be at least 1")
+    if max_relative_target is None or not np.isfinite(max_relative_target) or max_relative_target <= 0:
+        raise ValueError("max_relative_target must be a finite positive number")
+    if np.asarray(reset_pose).shape != (6,) or not np.isfinite(reset_pose).all():
+        raise ValueError("reset_pose must contain six finite values")
     env = make_real_env(
         port=ROBOT_PORT,
         robot_id=ROBOT_ID,
@@ -128,11 +141,6 @@ def eval_bc(config, ckpt_name, save_episode=True):
     """
     Every rollout: reset -> run an episode -> cal reward -> save result
     """
-    num_rollouts = config.get('num_rollouts', 1)
-    if num_rollouts < 1:
-        raise ValueError("num_rollouts must be at least 1")
-    if max_relative_target is None or max_relative_target <= 0:
-        raise ValueError("max_relative_target must be a positive number")
     episode_returns = []
     highest_rewards = []
     try:
@@ -158,7 +166,6 @@ def eval_bc(config, ckpt_name, save_episode=True):
             for t in range(max_timesteps):
                 # update onscreen render and wait for DT
                 if onscreen_render:
-                    # TODO define env._physics.render
                     image = (ts.observation["images"][onscreen_cam])
                     plt_img.set_data(image)
                     plt.pause(0.001)
@@ -204,7 +211,6 @@ def eval_bc(config, ckpt_name, save_episode=True):
                 target_qpos = action
 
                 # Step the environment
-                # TODO change the func step to SO-ARM101
                 ts = env.step(target_qpos)
 
                 # for visualization
@@ -280,6 +286,29 @@ def train_bc(train_dataloader, val_dataloader, config):
     for epoch in tqdm(range(num_epochs)):
         print(f'\nEpoch {epoch}')
 
+        # Training
+        policy.train()
+        optimizer.zero_grad()
+        for batch_idx, data in enumerate(train_dataloader):
+            forward_dict = forward_pass(data, policy)
+
+            # Backward
+            loss = forward_dict['loss']
+            if not torch.isfinite(loss):
+                raise RuntimeError('Non-finite training loss; check dataset and hyperparameters')
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            train_history.append(detach_dict(forward_dict))
+        epoch_summary = compute_dict_mean(train_history[(batch_idx+1) * epoch: (batch_idx+1)*(epoch+1)])
+        epoch_train_loss = epoch_summary['loss']
+        print(f'Train loss: {epoch_train_loss:.5f}')
+        summary_string = ''
+        for k, v in epoch_summary.items():
+            summary_string += f'{k}: {v.item():.3f} '
+        print(summary_string)
+
+
         #validation
         with torch.inference_mode():
             policy.eval()
@@ -300,26 +329,6 @@ def train_bc(train_dataloader, val_dataloader, config):
             summary_string += f'{k}: {v.item():.3f}'
         print(summary_string)
 
-        # Training
-        policy.train()
-        optimizer.zero_grad()
-        for batch_idx, data in enumerate(train_dataloader):
-            forward_dict = forward_pass(data, policy)
-
-            # Backward
-            loss = forward_dict['loss']
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            train_history.append(detach_dict(forward_dict))
-        epoch_summary = compute_dict_mean(train_history[(batch_idx+1) * epoch: (batch_idx+1)*(epoch+1)])
-        epoch_train_loss = epoch_summary['loss']
-        print(f'Train loss: {epoch_train_loss:.5f}')
-        summary_string = ''
-        for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        print(summary_string)
-
         if epoch % 100 == 0:
             ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
             torch.save(policy.state_dict(), ckpt_path)
@@ -328,6 +337,8 @@ def train_bc(train_dataloader, val_dataloader, config):
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
     torch.save(policy.state_dict(), ckpt_path)
 
+    if best_ckpt_info is None:
+        raise RuntimeError("No finite validation loss; check dataset and training settings")
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info
     ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')
     torch.save(best_state_dict, ckpt_path)
@@ -353,6 +364,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
         plt.legend()
         plt.title(key)
         plt.savefig(plot_path)
+        plt.close()
     print(f'Saved plots to {ckpt_dir}')
 
 
@@ -360,7 +372,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
 
 
 def main(args):
-    set_seed(1)
+    set_seed(args["seed"])
 
     # command line parameters
     is_eval = args['eval']
@@ -373,8 +385,7 @@ def main(args):
     num_epochs = args['num_epochs']
 
     # get task parameters
-    # TODO thay cái này thành SO-ARM
-    from low_level_control import TASK_CONFIGS
+    from act.low_level_control import TASK_CONFIGS
     task_config = TASK_CONFIGS[task_name]
     dataset_dir = task_config['dataset_dir']
     num_episodes = task_config['num_episodes']
@@ -383,10 +394,22 @@ def main(args):
     state_dim = task_config["state_dim"]
 
     # fixed parameters
-    state_dim = 6
     lr_backbone = 1e-5
     backbone = 'resnet18'
+    if state_dim != 6:
+        raise ValueError('SO-ARM101 requires state_dim=6')
+    if not camera_names or not set(camera_names).issubset(CAMERA_CONFIGS):
+        raise ValueError('Task cameras must be present in hardware_constant.CAMERA_CONFIGS')
+    if num_epochs < 1 or batch_size_train < 1 or not np.isfinite(args['lr']) or args['lr'] <= 0:
+        raise ValueError("num_epochs, batch_size and lr must be positive")
     if policy_class == 'ACT':
+        for key in ('chunk_size', 'hidden_dim', 'dim_feedforward'):
+            if args.get(key) is None or args[key] < 1:
+                raise ValueError(f"--{key} must be a positive integer for ACT")
+        if args.get('kl_weight') is None or args['kl_weight'] < 0:
+            raise ValueError("--kl_weight must be non-negative for ACT")
+        if args['hidden_dim'] % 8:
+            raise ValueError("--hidden_dim must be divisible by 8")
         enc_layers = 4
         dec_layers = 7
         nheads = 8
@@ -427,6 +450,8 @@ def main(args):
         'num_rollouts': args['num_rollouts'],
         'reset_pose': args['reset_pose'],
         'max_relative_target': args['max_relative_target'],
+        'dataset_dir': dataset_dir,
+        'num_episodes': num_episodes,
     }
 
     if is_eval:
@@ -449,6 +474,8 @@ def main(args):
     # save dataset stats
     if not os.path.isdir(ckpt_dir):
         os.makedirs(ckpt_dir)
+    with open(os.path.join(ckpt_dir, 'training_config.json'), 'w') as f:
+        json.dump(config, f, indent=2)
     stats_path = os.path.join(ckpt_dir, f"dataset_stats.pkl")
     with open(stats_path, 'wb') as f:
         pickle.dump(stats, f)

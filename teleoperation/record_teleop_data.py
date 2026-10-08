@@ -1,64 +1,20 @@
-#!/usr/bin/env python3
-"""Leader -> real follower teleop, dual camera feed + episode recording — LeRobot version.
-
-Cùng logic với record_teleop_data.py gốc, nhưng thay toàn bộ phần serial protocol thô
-(0x55 0x55 packets) và cv2.VideoCapture thủ công bằng lerobot.robots.so101_follower /
-lerobot.teleoperators.so101_leader. Camera front + wrist được khai báo trực tiếp trong
-config của robot (LeRobot hỗ trợ nhiều camera cùng lúc qua dict `cameras`), robot tự
-connect/đọc cả 2 mỗi lần gọi get_observation() -- không cần tự quản lý VideoCapture nữa.
-
-Vẫn giữ 2 process riêng (script này + sim_view_follower.py chạy qua Isaac Lab) vì lý do
-tương tự bản gốc: chỉ 1 process được giữ port serial của follower tại 1 thời điểm, và
-Kit UI / cv2 Qt window không share được 1 process. State được truyền qua follower_state.json.
-
-KHÁC BIỆT CẦN LƯU Ý so với bản gốc:
-  - Không còn tham số --tracking-ms: SO101Follower.send_action() ghi thẳng goal position,
-    không có khái niệm "tracking_time_ms" per-call như giao thức cũ. Độ mượt di chuyển giờ
-    phụ thuộc P-gain/tốc độ nội tại của servo, không chỉnh được per-tick từ code này.
-  - "state" ghi vào dataset giờ lấy trực tiếp từ get_observation() (đọc thật từ follower
-    mỗi tick, cùng lúc với action/camera) thay vì poll nền ~10Hz như bản gốc -- SO101Follower
-    đã tối ưu sẵn tốc độ đọc bus nên không cần tách thread poll riêng nữa. Nếu bạn thấy loop
-    tụt xuống dưới ~25Hz khi test, báo mình để đưa lại poll thread như cũ.
-
-Usage (venv của project, không cần Isaac Lab cho nửa này):
-    ./venv/bin/python record_teleop_data.py
-"""
-
-
-""" The data contrainer structure
-teleoperation/
-├── record_teleop_data.py
-├── follower_state.json
-└── data/
-    └── pick_place_front_view_v3/
-        ├── episode_0000/
-        │   ├── front.mp4
-        │   ├── wrist.mp4
-        │   └── data.npz
-        │
-        ├── episode_0001/
-        │   ├── front.mp4
-        │   ├── wrist.mp4
-        │   └── data.npz
-        │
-        └── episode_0002/
-            ├── front.mp4
-            ├── wrist.mp4
-            └── data.npz
-"""
+"""Live leader/follower teleoperation with an OpenCV dashboard and NPZ/MP4 recording."""
+# Allow direct execution from the repository as well as python -m.
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import argparse
 import queue
 import threading
 import time
-from pathlib import Path
 
 import cv2
 import json
 import numpy as np
 import os
 
-from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.teleoperators.so_leader import (
     SO101Leader,
     SO101LeaderConfig
@@ -69,61 +25,19 @@ from lerobot.robots.so_follower import (
     SO101FollowerConfig
 )
 
-parser = argparse.ArgumentParser(description="SO-ARM101 teleop data recorder (LeRobot).")
-parser.add_argument(
-    "--data-dir",
-    type=str,
-    default="pick_place_front_view_v3",
-    help="Subfolder under data/ to save episodes into.",
+from hardware_constant import (
+    LEADER_PORT, FOLLOWER_PORT, LEADER_ID, FOLLOWER_ID,
+    CONTROL_HZ, CONTROL_DT, CAMERA_FPS, CAMERA_CONFIGS, JOINT_KEYS,
 )
-args_cli = parser.parse_args()
-
-print("=========================================")
-print("   SO-ARM101 TELEOP DATA RECORDER (LeRobot)")
-print("=========================================\n")
-
-# --- Sửa 4 giá trị này theo port + id bạn đã calibrate ---
-LEADER_PORT = "/dev/tty.usbmodem5B8E1128291"
-FOLLOWER_PORT = "/dev/tty.usbmodem5B8E1131141"
-
-LEADER_ID = "so101_leader"
-FOLLOWER_ID = "so101_follower"
-
-# --- Camera: sửa index_or_path theo máy bạn (xem camera_utils.py để lấy index ổn định) ---
-CAMERA_FPS = 30
-cameras_config = {
-    "front": OpenCVCameraConfig(index_or_path=1, width=640, height=480, fps=CAMERA_FPS),
-    "wrist": OpenCVCameraConfig(index_or_path=0, width=640, height=480, fps=CAMERA_FPS),
-}
-
-# Canonical ACT vector order. Keep this identical to act/low_level_control.py.
-# Never sort these keys alphabetically: that changes the physical joint mapped
-# to each model output.
-MOTOR_NAMES = [
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-]
-JOINT_KEYS = [f"{name}.pos" for name in MOTOR_NAMES]
+from hardware_utils import disconnect_arm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "data" / args_cli.data_dir
+OUTPUT_DIR = SCRIPT_DIR / "data" / "pick_place_act_v1"
 STATE_FILE = SCRIPT_DIR / "follower_state.json"
-CONTROL_HZ = 30
-CONTROL_DT = 1.0 / CONTROL_HZ
-
-follower_config = SO101FollowerConfig(port=FOLLOWER_PORT, id=FOLLOWER_ID, cameras=cameras_config)
-leader_config = SO101LeaderConfig(port=LEADER_PORT, id=LEADER_ID)
-
-follower = SO101Follower(follower_config)
-leader = SO101Leader(leader_config)
 
 
 def write_follower_state(observation):
-    """Ghi state hiện tại xuống JSON cho sim_view_follower.py đọc (process khác)."""
+    """Write the latest measured joint state as an atomic JSON snapshot."""
     tmp_path = STATE_FILE.with_suffix(".tmp")
     # Chỉ lấy các key dạng ".pos" (joint state), bỏ ảnh camera ra khỏi JSON
     joint_state = {k: v for k, v in observation.items() if k.endswith(".pos")}
@@ -186,12 +100,20 @@ class EpisodeWriter:
             name: cv2.VideoWriter(str(out_dir / f"{name}.mp4"), fourcc, fps, frame_size)
             for name in camera_names
         }
+        failed = [name for name, video in self.videos.items() if not video.isOpened()]
+        if failed:
+            for video in self.videos.values():
+                video.release()
+            raise RuntimeError(f"Cannot open video writers: {failed}")
+        self.frame_size = tuple(frame_size)
+        self.writer_error = None
+        self.closed = False
         self.timestamps = []
         self.actions = []
         self.states = []
         self.start_time = time.time()
         self.max_queue_size = 0
-        self.frame_queue = queue.Queue()
+        self.frame_queue = queue.Queue(maxsize=120)
         """
         Main thread:
         - Control Robot
@@ -205,29 +127,57 @@ class EpisodeWriter:
         self.writer_thread.start()
 
     def _write_loop(self):
-        while True:
-            item = self.frame_queue.get()
-            if item is None:  # sentinel
-                break
-            frames_by_cam = item
-            for name, frame in frames_by_cam.items():
-                self.videos[name].write(frame)
+        try:
+            while True:
+                frames = self.frame_queue.get()
+                if frames is None:
+                    break
+                for name, frame in frames.items():
+                    self.videos[name].write(frame)
+        except Exception as exc:
+            self.writer_error = exc
 
     def append(self, timestamp, action, state, frames_by_cam):
+        if self.closed or self.writer_error is not None:
+            raise RuntimeError("Episode writer is closed or failed") from self.writer_error
+        if set(frames_by_cam) != set(self.camera_names):
+            raise ValueError("Every sample must include all configured cameras")
+        for frame in frames_by_cam.values():
+            if (frame.ndim != 3 or frame.shape[2] != 3 or frame.dtype != np.uint8
+                    or (frame.shape[1], frame.shape[0]) != self.frame_size):
+                raise ValueError("All camera frames must match the writer size and be uint8 BGR")
+        # Keep memory bounded; abort instead of silently dropping camera samples.
+        try:
+            self.frame_queue.put_nowait({name: frame.copy() for name, frame in frames_by_cam.items()})
+        except queue.Full as exc:
+            raise RuntimeError("Video writer cannot keep up; episode queue is full") from exc
         self.timestamps.append(timestamp)
-        self.actions.append(action)
-        self.states.append(state)
-        self.frame_queue.put(frames_by_cam)
+        self.actions.append(list(action))
+        self.states.append(list(state))
         self.max_queue_size = max(self.max_queue_size, self.frame_queue.qsize())
 
     def _finish_writer(self):
-        self.frame_queue.put(None)
-        self.writer_thread.join()
-        for v in self.videos.values():
-            v.release()
+        if not self.closed:
+            self.closed = True
+            while self.writer_thread.is_alive():
+                try:
+                    self.frame_queue.put(None, timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+            self.writer_thread.join()
+            for video in self.videos.values():
+                video.release()
+        if self.writer_error is not None:
+            raise RuntimeError("Video encoding failed; episode is incomplete") from self.writer_error
 
     def save(self):
         self._finish_writer()
+        if not self.timestamps:
+            import shutil
+            shutil.rmtree(self.out_dir)
+            print(f"[DISCARDED] Empty episode: {self.out_dir}")
+            return
         np.savez_compressed(
             self.out_dir / "data.npz",
             timestamps=np.array(self.timestamps, dtype=np.float64),
@@ -434,122 +384,109 @@ class DashboardRenderer:
 
         return img
 
-try:
-    follower.connect()
-    print(f"[OK] Follower + {len(cameras_config)} camera(s) connected ({FOLLOWER_PORT})")
-    leader.connect()
-    print(f"[OK] Leader connected ({LEADER_PORT})")
-except Exception as e:
-    print(f"[ERROR] Connection failure: {e}")
-    raise SystemExit(1)
 
-print("\n[LIVE] Teleoperation running in camera window.")
-print("  r = start recording a new episode")
-print("  s = stop & save the current episode")
-print("  x = discard the current episode")
-print("  q = quit")
-print(f"\n[INFO] Follower state -> {STATE_FILE} (for sim_view_follower.py in another terminal)\n")
-
-episode = None
-camera_names = list(cameras_config.keys())
-joint_keys = JOINT_KEYS
-rate_monitor = LoopRateMonitor(target_hz=CONTROL_HZ)
-dashboard = DashboardRenderer(target_hz=CONTROL_HZ, joint_names=[])
-
-try:
-    while True:
-        loop_start = time.time()
-
-        # get_observation() trả về dict gồm joint state (key "*.pos") + 1 numpy frame
-        # cho MỖI camera trong cameras_config (key = tên camera, ví dụ "front", "wrist")
-        observation = follower.get_observation()
-        action = leader.get_action()
-        follower.send_action(action)
-
-        missing_action_keys = [key for key in joint_keys if key not in action]
-        missing_state_keys = [key for key in joint_keys if key not in observation]
-        if missing_action_keys or missing_state_keys:
-            raise KeyError(
-                f"SO-ARM101 joint schema mismatch: "
-                f"missing action keys={missing_action_keys}, "
-                f"missing state keys={missing_state_keys}"
-            )
-
-        if dashboard.joint_names != joint_keys:
-            dashboard.set_joint_names(joint_keys)
-            dashboard.log("Canonical joint schema initialized")
-
-        action_vec = [action[k] for k in joint_keys]
-        state_vec = [observation[k] for k in joint_keys]
-
-        frames_by_cam = {}
-        for name in camera_names:
-            frame = observation[name]
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # LeRobot trả RGB, cv2 cần BGR
-            # frame = cv2.rotate(frame, cv2.ROTATE_180)
-            frames_by_cam[name] = frame
-
-        write_follower_state(observation)
-
-        if episode is not None:
-            episode.append(loop_start, action_vec, state_vec, frames_by_cam)
-
-        # display = frames_by_cam["wrist"].copy()
-        # status = f"REC ({len(episode.timestamps)})" if episode is not None else "idle"
-        # color = (0, 0, 255) if episode is not None else (200, 200, 200)
-        # cv2.putText(display, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        # cv2.imshow("SO-ARM101 Teleop Recorder", display)
-
-        display = dashboard.render(
-            frames_by_cam=frames_by_cam,
-            episode=episode,
-            rate_monitor=rate_monitor,
-            state_vec=state_vec,
-            action_vec=action_vec,
-        )
-        cv2.imshow("SO-ARM101 Data Capture Dashboard", display)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("r") and episode is None:
-            h, w = frames_by_cam["wrist"].shape[:2]
-            episode = EpisodeWriter(
-                next_episode_dir(), CAMERA_FPS, camera_names, (w, h), joint_keys
-            )
-            dashboard.log(f"Recording {episode.out_dir.name}", "INFO")
-        elif key == ord("s") and episode is not None:
-            saved_name = episode.out_dir.name
-            episode.save()
-            dashboard.log(f"Saved {saved_name}", "INFO")
-            episode = None
-        elif key == ord("x") and episode is not None:
-            discarded_name = episode.out_dir.name
-            episode.discard()
-            dashboard.log(f"Discarded {discarded_name}", "WARN")
-            episode = None
-        elif key == ord("q"):
-            break
-
-        elapsed = time.time() - loop_start
-        time.sleep(max(0, CONTROL_DT - elapsed))
-        rate_monitor.tick()
-
-except KeyboardInterrupt:
-    print("\n[EXIT] Interrupted by user.")
-except Exception as e:
-    # Bắt riêng để phân biệt lỗi mất kết nối leader/follower, như bản teleop.py trước đó
-    print(f"\n[ERROR] {e}")
-finally:
-    print()
-    if episode is not None:
-        episode.save()
-    print("[SAFETY] Disconnecting...")
+def main():
+    global OUTPUT_DIR
+    parser = argparse.ArgumentParser(description="SO-ARM101 teleop data recorder (LeRobot).")
+    parser.add_argument("--data-dir", default="pick_place_act_v1",
+                        help="Dataset subfolder under teleoperation/data/.")
+    args = parser.parse_args()
+    OUTPUT_DIR = SCRIPT_DIR / "data" / args.data_dir
+    follower = SO101Follower(SO101FollowerConfig(
+        port=FOLLOWER_PORT, id=FOLLOWER_ID, cameras=CAMERA_CONFIGS))
+    leader = SO101Leader(SO101LeaderConfig(port=LEADER_PORT, id=LEADER_ID))
+    episode = None
+    camera_names = list(CAMERA_CONFIGS)
+    joint_keys = JOINT_KEYS
+    rate_monitor = LoopRateMonitor(target_hz=CONTROL_HZ)
+    dashboard = DashboardRenderer(target_hz=CONTROL_HZ, joint_names=[])
     try:
-        follower.disconnect()
-    except Exception as e:
-        print(f"[WARN] Follower disconnect issue: {e}")
-    try:
-        leader.disconnect()
-    except Exception as e:
-        print(f"[WARN] Leader disconnect issue: {e}")
-    cv2.destroyAllWindows()
-    print("[DONE] Hardware connections safely released.")
+        follower.connect()
+        print(f"[OK] Follower + {len(CAMERA_CONFIGS)} cameras connected ({FOLLOWER_PORT})")
+        leader.connect()
+        print(f"[OK] Leader connected ({LEADER_PORT})")
+        print("[LIVE] Teleoperation active. R: record, S: save, X: discard, Q: quit")
+        while True:
+            loop_start = time.time()
+
+            # get_observation() trả về dict gồm joint state (key "*.pos") + 1 numpy frame
+            # cho MỖI camera trong CAMERA_CONFIGS (key = tên camera, ví dụ "front", "wrist")
+            observation = follower.get_observation()
+            action = leader.get_action()
+            follower.send_action(action)
+
+            missing_action_keys = [key for key in joint_keys if key not in action]
+            missing_state_keys = [key for key in joint_keys if key not in observation]
+            if missing_action_keys or missing_state_keys:
+                raise KeyError(
+                    f"SO-ARM101 joint schema mismatch: "
+                    f"missing action keys={missing_action_keys}, "
+                    f"missing state keys={missing_state_keys}"
+                )
+
+            if dashboard.joint_names != joint_keys:
+                dashboard.set_joint_names(joint_keys)
+                dashboard.log("Canonical joint schema initialized")
+
+            action_vec = [action[k] for k in joint_keys]
+            state_vec = [observation[k] for k in joint_keys]
+
+            frames_by_cam = {}
+            for name in camera_names:
+                frame = observation[name]
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # LeRobot trả RGB, cv2 cần BGR
+                # frame = cv2.rotate(frame, cv2.ROTATE_180)
+                frames_by_cam[name] = frame
+
+            write_follower_state(observation)
+
+            if episode is not None:
+                episode.append(loop_start, action_vec, state_vec, frames_by_cam)
+
+            display = dashboard.render(
+                frames_by_cam=frames_by_cam,
+                episode=episode,
+                rate_monitor=rate_monitor,
+                state_vec=state_vec,
+                action_vec=action_vec,
+            )
+            cv2.imshow("SO-ARM101 Data Capture Dashboard", display)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("r") and episode is None:
+                h, w = frames_by_cam["wrist"].shape[:2]
+                episode = EpisodeWriter(
+                    next_episode_dir(), CAMERA_FPS, camera_names, (w, h), joint_keys
+                )
+                dashboard.log(f"Recording {episode.out_dir.name}", "INFO")
+            elif key == ord("s") and episode is not None:
+                saved_name = episode.out_dir.name
+                completed, episode = episode, None
+                completed.save()
+                dashboard.log(f"Saved {saved_name}", "INFO")
+            elif key == ord("x") and episode is not None:
+                discarded_name = episode.out_dir.name
+                completed, episode = episode, None
+                completed.discard()
+                dashboard.log(f"Discarded {discarded_name}", "WARN")
+            elif key == ord("q"):
+                break
+
+            elapsed = time.time() - loop_start
+            time.sleep(max(0, CONTROL_DT - elapsed))
+            rate_monitor.tick()
+
+    except KeyboardInterrupt:
+        print("\n[EXIT] Interrupted by user.")
+    finally:
+        try:
+            if episode is not None:
+                episode.save()
+        finally:
+            disconnect_arm(follower)
+            disconnect_arm(leader)
+            cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()

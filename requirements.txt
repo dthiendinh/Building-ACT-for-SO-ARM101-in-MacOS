@@ -8,3 +8,5 @@ dm-env==1.6
 dm-tree==0.1.10
 matplotlib
 IPython
+einops
+tqdm

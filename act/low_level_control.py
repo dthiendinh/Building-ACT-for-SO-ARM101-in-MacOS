@@ -1,58 +1,30 @@
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 import numpy as np
 import time
 import dm_env
+from hardware_constant import FOLLOWER_PORT, FOLLOWER_ID, CONTROL_DT, CAMERA_CONFIGS, MOTOR_NAMES
+from hardware_utils import disconnect_arm
 
-
-# FOR SO-ARM101
-MOTOR_NAMES = [
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-]
-
-# CONSTANT for CONFIG
-ROBOT_PORT = "/dev/tty.usbmodem5B8E1131141"
-ROBOT_ID = "so101_follower"
+ROBOT_PORT = FOLLOWER_PORT
+ROBOT_ID = FOLLOWER_ID
 RESET_POSE = None
-DT = 1/30 # 30Hz
+DT = CONTROL_DT
 MAX_RELATIVE_TARGET = 5.0  # degrees per command; clipped again by LeRobot
-CAMERA_FPS = 30
-CAMERAS = {
-    "front": OpenCVCameraConfig(index_or_path=1, width=640, height=480, fps=CAMERA_FPS),
-    "wrist": OpenCVCameraConfig(index_or_path=0, width=640, height=480, fps=CAMERA_FPS),
-}
+CAMERAS = CAMERA_CONFIGS
 TASK_CONFIGS = {
-
     "so101_pick_place": {
-
-        "dataset_dir":
-            "teleoperation/data/pick_place_front_view_v3",
-
-        "num_episodes":
-            50,
-
-        # Evaluation rollout horizon in control steps (~10 s at 30 Hz).
-        # Recorded episodes have their own lengths; training uses chunk_size.
-        "episode_len":
-            300,
-
-        "camera_names":
-            ["wrist", "front"],
-
-        "state_dim":
-            6,
+        "dataset_dir": "teleoperation/data/pick_place_act_v1_train",
+        "num_episodes": 50,  # Set to your approved, consecutively numbered count.
+        "episode_len": 300,  # Evaluation steps; does not truncate training data.
+        "camera_names": ["wrist", "front"],
+        "state_dim": 6,
     },
 }
 
 
 class RealEnv:
     # Create the real robot
-    def __init__(self, port, robot_id, cameras=None, dt=1/30, reset_pose=None, max_relative_target=None):
+    def __init__(self, port, robot_id, cameras=None, dt=CONTROL_DT, reset_pose=None, max_relative_target=None):
         self.dt = dt
         self.reset_pose = reset_pose
 
@@ -60,12 +32,16 @@ class RealEnv:
         config = SO101FollowerConfig(
             port = port,
             id = robot_id,
-            cameras = cameras,
+            cameras = cameras or {},
             max_relative_target = max_relative_target,
         )
         
         self.robot = SO101Follower(config)
-        self.robot.connect()
+        try:
+            self.robot.connect()
+        except BaseException:
+            disconnect_arm(self.robot)
+            raise
 
     
     def get_qpos(self, raw_obs):
@@ -138,9 +114,9 @@ class RealEnv:
         "Smoothly interpolate from current position to target position."
 
         target_pose = np.asarray(target_pos,dtype=np.float32)
-        if target_pose.shape != (6,):
+        if target_pose.shape != (6,) or not np.all(np.isfinite(target_pose)):
             raise ValueError(
-                "reset pose must have shape (6,)"
+                "reset pose must contain six finite values"
             )
         
         raw_obs = self.robot.get_observation()
@@ -152,7 +128,7 @@ class RealEnv:
         for i in range(1, num_steps + 1):
             alpha = i / num_steps
 
-            pose = (1.0 - alpha) * start_pos + alpha * target_pos
+            pose = (1.0 - alpha) * start_pos + alpha * target_pose
 
             command = self._vector_to_action_dict(pose)
 
@@ -214,11 +190,10 @@ class RealEnv:
         )
 
     def close(self):
-        if self.robot.is_connected:
-            self.robot.disconnect()
+        disconnect_arm(self.robot)
 
 
-def make_real_env(port, robot_id, cameras=None, dt=1 / 30, reset_pose=None, max_relative_target=None):
+def make_real_env(port, robot_id, cameras=None, dt=CONTROL_DT, reset_pose=None, max_relative_target=None):
     env = RealEnv(
         port=port,
         robot_id=robot_id,

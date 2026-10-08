@@ -734,7 +734,7 @@ class DatasetInspector:
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Visual validator / inspector for SO-ARM101 teleoperation datasets.")
-    parser.add_argument("--dataset-dir", type=str, default="data/pick_place_front_view_v3", help="Dataset folder containing episode_xxxx directories.")
+    parser.add_argument("--dataset-dir", type=str, default="teleoperation/data/pick_place_front_view_v3", help="Dataset folder containing episode_xxxx directories.")
     parser.add_argument("--target-fps", type=float, default=30.0, help="Expected control/data rate used for timing validation.")
     parser.add_argument("--max-action-jump", type=float, default=25.0, help="Flag absolute per-frame joint action changes larger than this value.")
     parser.add_argument("--max-dt-factor", type=float, default=2.5, help="Flag timestamp gaps larger than (1/target_fps) * this factor.")

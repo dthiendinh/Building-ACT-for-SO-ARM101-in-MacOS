@@ -2,7 +2,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.transforms as transforms
 
-from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
+from act.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
 import IPython 
 e = IPython.embed
 
@@ -35,7 +35,7 @@ class ACTPolicy(nn.Module):
         self.kl_weight = args_override['kl_weight']
         print(f"KL Weight {self.kl_weight}")
 
-    def __call__(self, qpos, image, actions=None, is_pad=None):
+    def forward(self, qpos, image, actions=None, is_pad=None):
         env_state = None 
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                             std=[0.229, 0.224, 0.225])
@@ -52,7 +52,8 @@ class ACTPolicy(nn.Module):
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
             loss_dict = dict()
             all_l1 = F.l1_loss(actions, a_hat, reduction='none')
-            l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
+            valid = ~is_pad.unsqueeze(-1)
+            l1 = (all_l1 * valid).sum() / (valid.sum().clamp_min(1) * actions.shape[-1])
             loss_dict['l1'] = l1
             loss_dict["kl"] = total_kld[0]
             loss_dict['loss'] = loss_dict['l1'] + loss_dict['kl'] * self.kl_weight
@@ -72,7 +73,7 @@ class CNNMLPPolicy(nn.Module):
         self.model = model # decoder
         self.optimizer = optimizer
 
-    def __call__(self, qpos, image, actions=None, is_pad=None):
+    def forward(self, qpos, image, actions=None, is_pad=None):
         env_state = None # TODO
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])

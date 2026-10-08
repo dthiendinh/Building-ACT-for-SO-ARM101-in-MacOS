@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+teleoperation/data/
+teleoperation/follower_state.json
+teleoperation/follower_state.tmp
+outputs/

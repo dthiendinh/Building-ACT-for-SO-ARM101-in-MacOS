@@ -1,3 +1,9 @@
+# Allow direct execution from the repository as well as python -m.
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import time 
 
 from lerobot.teleoperators.so_leader import (
@@ -10,16 +16,8 @@ from lerobot.robots.so_follower import (
     SO101FollowerConfig
 )
 
-# Configurations
-
-LEADER_PORT = "/dev/tty.usbmodem5B8E1128291"
-FOLLOWER_PORT = "/dev/tty.usbmodem5B8E1131141"
-
-LEADER_ID = "so101_leader"
-FOLLOWER_ID = "so101_follower"
-
-CONTROL_HZ = 30.0
-CONTROL_DT = 1.0 / CONTROL_HZ
+from hardware_constant import LEADER_PORT, FOLLOWER_PORT, LEADER_ID, FOLLOWER_ID, CONTROL_DT
+from hardware_utils import disconnect_arm
 
 
 def main():
@@ -103,21 +101,11 @@ def main():
 
         print(f"\nExit reason: {exit_reason}")
 
-        leader.disconnect()
-        follower.disconnect()
+        disconnect_arm(follower)
+        disconnect_arm(leader)
 
         print("Disconnected")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
