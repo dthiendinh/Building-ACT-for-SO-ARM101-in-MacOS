@@ -14,7 +14,7 @@ CAMERAS = CAMERA_CONFIGS
 #TODO:
 TASK_CONFIGS = {
     "so101_pick_place": {
-        "dataset_dir": "teleoperation/data/pick_candies",
+        "dataset_dir": "/workspace/pick_candies",
         "num_episodes": 50,  # Set to your approved, consecutively numbered count.
         "episode_len": 1500,  # Evaluation steps; does not truncate training data.
         "camera_names": ["wrist", "front"],
